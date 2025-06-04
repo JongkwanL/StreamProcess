@@ -1,0 +1,383 @@
+syntax = "proto3";
+
+package streamprocess;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// ==================== Common Messages ====================
+
+enum Priority {
+  PRIORITY_LOW = 0;
+  PRIORITY_NORMAL = 1;
+  PRIORITY_HIGH = 2;
+  PRIORITY_REALTIME = 3;
+}
+
+enum ProcessingStatus {
+  STATUS_UNKNOWN = 0;
+  STATUS_PENDING = 1;
+  STATUS_PROCESSING = 2;
+  STATUS_COMPLETED = 3;
+  STATUS_FAILED = 4;
+  STATUS_CANCELLED = 5;
+}
+
+message ProcessingMetadata {
+  string session_id = 1;
+  uint64 sequence_number = 2;
+  Priority priority = 3;
+  google.protobuf.Timestamp deadline = 4;
+  string model_id = 5;
+  map<string, string> custom_metadata = 6;
+}
+
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+// ==================== STT Service ====================
+
+service STTService {
+  // Bidirectional streaming for real-time speech recognition
+  rpc StreamingRecognize(stream StreamingRecognizeRequest) returns (stream StreamingRecognizeResponse);
+  
+  // Unary call for batch audio processing
+  rpc Recognize(RecognizeRequest) returns (RecognizeResponse);
+  
+  // Get available models and languages
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (STTCapabilities);
+}
+
+message StreamingRecognizeRequest {
+  oneof streaming_request {
+    StreamingRecognitionConfig config = 1;
+    AudioChunk audio_chunk = 2;
+  }
+}
+
+message StreamingRecognitionConfig {
+  ProcessingMetadata metadata = 1;
+  AudioConfig audio_config = 2;
+  RecognitionConfig recognition_config = 3;
+  bool enable_vad = 4;  // Voice Activity Detection
+  bool enable_partial_results = 5;
+  uint32 partial_results_interval_ms = 6;  // Debounce interval
+  bool enable_word_timestamps = 7;
+  bool enable_automatic_punctuation = 8;
+}
+
+message AudioConfig {
+  enum AudioEncoding {
+    ENCODING_UNSPECIFIED = 0;
+    LINEAR16 = 1;  // Uncompressed 16-bit signed little-endian samples
+    FLAC = 2;
+    MP3 = 3;
+    OPUS = 4;
+  }
+  
+  AudioEncoding encoding = 1;
+  uint32 sample_rate_hertz = 2;
+  uint32 channels = 3;
+  string language_code = 4;  // e.g., "en-US", "ko-KR"
+  repeated string alternative_language_codes = 5;  // For multi-language
+}
+
+message RecognitionConfig {
+  string model = 1;  // e.g., "base", "small", "medium", "large"
+  uint32 max_alternatives = 2;
+  bool profanity_filter = 3;
+  repeated string speech_contexts = 4;  // Hints/hot words
+  float temperature = 5;  // For sampling
+  uint32 beam_size = 6;
+  string compute_type = 7;  // "int8", "float16", "float32"
+}
+
+message AudioChunk {
+  bytes content = 1;
+  uint64 offset_ms = 2;  // Offset from start of stream
+  uint32 duration_ms = 3;
+  bool is_final = 4;  // Last chunk in stream
+}
+
+message StreamingRecognizeResponse {
+  repeated TranscriptEvent results = 1;
+  ProcessingStatus status = 2;
+  ErrorDetail error = 3;
+  StreamingMetrics metrics = 4;
+}
+
+message TranscriptEvent {
+  enum EventType {
+    EVENT_UNSPECIFIED = 0;
+    PARTIAL_TRANSCRIPT = 1;
+    FINAL_TRANSCRIPT = 2;
+    END_OF_SINGLE_UTTERANCE = 3;
+  }
+  
+  EventType event_type = 1;
+  repeated SpeechRecognitionAlternative alternatives = 2;
+  google.protobuf.Duration result_time_offset = 3;  // When in audio stream
+  google.protobuf.Duration result_end_time = 4;
+  float stability = 5;  // 0.0-1.0, confidence in partial result
+  string language_code = 6;  // Detected language
+}
+
+message SpeechRecognitionAlternative {
+  string transcript = 1;
+  float confidence = 2;
+  repeated WordInfo words = 3;
+}
+
+message WordInfo {
+  string word = 1;
+  google.protobuf.Duration start_time = 2;
+  google.protobuf.Duration end_time = 3;
+  float confidence = 4;
+}
+
+message StreamingMetrics {
+  uint32 processed_audio_ms = 1;
+  uint32 processing_latency_ms = 2;
+  uint32 queue_depth = 3;
+  float gpu_utilization = 4;
+}
+
+// Batch processing messages
+message RecognizeRequest {
+  ProcessingMetadata metadata = 1;
+  AudioConfig audio_config = 2;
+  RecognitionConfig recognition_config = 3;
+  bytes audio_content = 4;  // Or could be a URL/S3 path
+}
+
+message RecognizeResponse {
+  repeated SpeechRecognitionResult results = 1;
+  ProcessingStatus status = 2;
+  ErrorDetail error = 3;
+  BatchMetrics metrics = 4;
+}
+
+message SpeechRecognitionResult {
+  repeated SpeechRecognitionAlternative alternatives = 1;
+  string language_code = 2;
+}
+
+message BatchMetrics {
+  uint32 total_processing_time_ms = 1;
+  uint32 audio_duration_ms = 2;
+  float real_time_factor = 3;  // Processing time / audio duration
+}
+
+// Capabilities
+message GetCapabilitiesRequest {}
+
+message STTCapabilities {
+  repeated string available_models = 1;
+  repeated string supported_languages = 2;
+  repeated string supported_encodings = 3;
+  uint32 max_stream_duration_seconds = 4;
+  uint32 max_concurrent_streams = 5;
+}
+
+// ==================== OCR Service ====================
+
+service OCRService {
+  // Single document processing
+  rpc ProcessDocument(DocumentRequest) returns (OCRResponse);
+  
+  // Batch processing with streaming
+  rpc BatchProcess(stream DocumentRequest) returns (stream OCRResponse);
+  
+  // Get OCR capabilities
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (OCRCapabilities);
+}
+
+message DocumentRequest {
+  ProcessingMetadata metadata = 1;
+  DocumentConfig config = 2;
+  oneof document {
+    bytes image_content = 3;
+    string document_url = 4;  // S3/HTTP URL
+  }
+}
+
+message DocumentConfig {
+  repeated string languages = 1;  // e.g., ["en", "ch_sim"]
+  bool detect_layout = 2;
+  bool detect_tables = 3;
+  bool detect_orientation = 4;
+  bool enable_gpu = 5;
+  
+  enum OutputFormat {
+    FORMAT_TEXT = 0;
+    FORMAT_JSON = 1;
+    FORMAT_HTML = 2;
+    FORMAT_MARKDOWN = 3;
+  }
+  OutputFormat output_format = 6;
+  
+  message ImagePreprocessing {
+    bool auto_rotate = 1;
+    bool deskew = 2;
+    bool denoise = 3;
+    bool binarize = 4;
+    uint32 target_dpi = 5;
+  }
+  ImagePreprocessing preprocessing = 7;
+}
+
+message OCRResponse {
+  string session_id = 1;
+  ProcessingStatus status = 2;
+  ErrorDetail error = 3;
+  OCRResult result = 4;
+  OCRMetrics metrics = 5;
+}
+
+message OCRResult {
+  string full_text = 1;
+  repeated TextBlock blocks = 2;
+  DocumentLayout layout = 3;
+  float confidence = 4;
+  repeated DetectedLanguage detected_languages = 5;
+}
+
+message TextBlock {
+  string text = 1;
+  BoundingBox bounding_box = 2;
+  float confidence = 3;
+  
+  enum BlockType {
+    BLOCK_UNKNOWN = 0;
+    BLOCK_TEXT = 1;
+    BLOCK_TABLE = 2;
+    BLOCK_FIGURE = 3;
+    BLOCK_TITLE = 4;
+    BLOCK_SUBTITLE = 5;
+    BLOCK_HEADER = 6;
+    BLOCK_FOOTER = 7;
+  }
+  BlockType block_type = 4;
+  
+  repeated TextLine lines = 5;
+}
+
+message TextLine {
+  string text = 1;
+  BoundingBox bounding_box = 2;
+  float confidence = 3;
+  repeated Word words = 4;
+}
+
+message Word {
+  string text = 1;
+  BoundingBox bounding_box = 2;
+  float confidence = 3;
+}
+
+message BoundingBox {
+  uint32 x = 1;
+  uint32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  float rotation = 5;  // Rotation angle in degrees
+}
+
+message DocumentLayout {
+  uint32 page_number = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 dpi = 4;
+  float orientation = 5;  // Document rotation
+  repeated Region regions = 6;
+}
+
+message Region {
+  enum RegionType {
+    REGION_UNKNOWN = 0;
+    REGION_COLUMN = 1;
+    REGION_PARAGRAPH = 2;
+    REGION_TABLE = 3;
+    REGION_IMAGE = 4;
+  }
+  
+  RegionType type = 1;
+  BoundingBox bounding_box = 2;
+  repeated uint32 text_block_indices = 3;  // References to TextBlock
+}
+
+message DetectedLanguage {
+  string language_code = 1;
+  float confidence = 2;
+}
+
+message OCRMetrics {
+  uint32 processing_time_ms = 1;
+  uint32 detection_time_ms = 2;
+  uint32 recognition_time_ms = 3;
+  uint32 postprocessing_time_ms = 4;
+  uint32 total_characters = 5;
+  uint32 total_words = 6;
+  float gpu_utilization = 7;
+}
+
+message OCRCapabilities {
+  repeated string supported_languages = 1;
+  repeated string supported_formats = 2;
+  uint32 max_image_size_mb = 3;
+  uint32 max_concurrent_requests = 4;
+  bool gpu_available = 5;
+}
+
+// ==================== Queue Management Service ====================
+
+service QueueService {
+  // Get queue status
+  rpc GetQueueStatus(QueueStatusRequest) returns (QueueStatusResponse);
+  
+  // Cancel a job
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  
+  // Get job status
+  rpc GetJobStatus(JobStatusRequest) returns (JobStatusResponse);
+}
+
+message QueueStatusRequest {
+  string queue_name = 1;
+}
+
+message QueueStatusResponse {
+  uint32 pending_jobs = 1;
+  uint32 processing_jobs = 2;
+  uint32 completed_jobs = 3;
+  uint32 failed_jobs = 4;
+  float average_wait_time_ms = 5;
+  float average_processing_time_ms = 6;
+}
+
+message CancelJobRequest {
+  string job_id = 1;
+  string reason = 2;
+}
+
+message CancelJobResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message JobStatusRequest {
+  string job_id = 1;
+}
+
+message JobStatusResponse {
+  string job_id = 1;
+  ProcessingStatus status = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp completed_at = 5;
+  ErrorDetail error = 6;
+  map<string, string> metadata = 7;
+}

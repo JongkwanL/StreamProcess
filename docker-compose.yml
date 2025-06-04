@@ -1,0 +1,175 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: streamprocess-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - streamprocess-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: streamprocess-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    networks:
+      - streamprocess-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  grpc-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: grpc-server
+    container_name: streamprocess-grpc
+    ports:
+      - "50051:50051"
+      - "9090:9090"  # Metrics
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - streamprocess-network
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  rest-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rest-api
+    container_name: streamprocess-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GRPC_SERVER_HOST=grpc-server
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      - grpc-server
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+
+  stt-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: stt-worker
+    container_name: streamprocess-stt-worker
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - WHISPER_MODEL_SIZE=base
+      - WHISPER_DEVICE=cpu
+      - WORKER_TYPE=stt
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - streamprocess-network
+    volumes:
+      - ./models:/app/models
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+
+  ocr-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ocr-worker
+    container_name: streamprocess-ocr-worker
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - OCR_USE_GPU=false
+      - WORKER_TYPE=ocr
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - streamprocess-network
+    volumes:
+      - ./models:/app/models
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: streamprocess-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: streamprocess-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+
+networks:
+  streamprocess-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
