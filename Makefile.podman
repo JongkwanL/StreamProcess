@@ -1,0 +1,209 @@
+.PHONY: help install dev-install proto build run stop clean test lint format benchmark
+
+# Variables
+PYTHON := python3
+PIP := $(PYTHON) -m pip
+PODMAN := podman
+PODMAN_COMPOSE := podman-compose
+BUILDAH := buildah
+PROJECT_NAME := streamprocess
+
+# Colors for output
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+BLUE := \033[0;34m
+NC := \033[0m # No Color
+
+help: ## Show this help message
+	@echo "$(GREEN)StreamProcess - Real-time Multimodal Processing Pipeline$(NC)"
+	@echo "$(BLUE)Using Podman (Rootless, Daemonless Containers)$(NC)"
+	@echo "$(YELLOW)Available commands:$(NC)"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2}'
+
+check-podman: ## Check if Podman is installed
+	@command -v $(PODMAN) >/dev/null 2>&1 || { echo "$(RED)Podman is not installed. Please install it first.$(NC)"; exit 1; }
+	@command -v $(PODMAN_COMPOSE) >/dev/null 2>&1 || { echo "$(YELLOW)podman-compose not found. Installing...$(NC)"; $(PIP) install podman-compose; }
+	@echo "$(GREEN)✓ Podman version: $$($(PODMAN) --version)$(NC)"
+	@echo "$(GREEN)✓ Podman is running in rootless mode: $$($(PODMAN) info --format '{{.Host.Security.Rootless}}')$(NC)"
+
+install: ## Install production dependencies
+	$(PIP) install -r requirements.txt
+	@echo "$(GREEN)✓ Production dependencies installed$(NC)"
+
+dev-install: install ## Install development dependencies
+	$(PIP) install -r requirements-dev.txt 2>/dev/null || true
+	pre-commit install 2>/dev/null || true
+	@echo "$(GREEN)✓ Development dependencies installed$(NC)"
+
+proto: ## Compile protobuf files
+	$(PYTHON) scripts/compile_protos.py
+	@echo "$(GREEN)✓ Protobuf files compiled$(NC)"
+
+build: check-podman proto ## Build container images with Podman/Buildah
+	@echo "$(YELLOW)Building container images with Buildah...$(NC)"
+	$(PODMAN_COMPOSE) -f podman-compose.yml build --no-cache
+	@echo "$(GREEN)✓ Container images built$(NC)"
+	@echo "$(BLUE)Images:$(NC)"
+	@$(PODMAN) images | grep $(PROJECT_NAME)
+
+build-fast: check-podman proto ## Build container images with cache
+	$(PODMAN_COMPOSE) -f podman-compose.yml build
+	@echo "$(GREEN)✓ Container images built (with cache)$(NC)"
+
+run: check-podman ## Start all services with podman-compose
+	@echo "$(YELLOW)Starting services in rootless mode...$(NC)"
+	$(PODMAN_COMPOSE) -f podman-compose.yml up -d
+	@echo "$(GREEN)✓ Services started$(NC)"
+	@echo "$(YELLOW)Services:$(NC)"
+	@echo "  - gRPC Server: localhost:50051"
+	@echo "  - REST API: http://localhost:8000"
+	@echo "  - Redis: localhost:6379"
+	@echo "  - MinIO: http://localhost:9001 (admin/admin)"
+	@echo "  - Prometheus: http://localhost:9091"
+	@echo "  - Grafana: http://localhost:3000 (admin/admin)"
+	@echo ""
+	@echo "$(BLUE)Check pod status:$(NC) $(PODMAN) pod ps"
+	@echo "$(BLUE)Check containers:$(NC) $(PODMAN) ps"
+
+run-pod: check-podman ## Run services in a Podman pod (Kubernetes-like)
+	@echo "$(YELLOW)Creating Podman pod...$(NC)"
+	$(PODMAN) pod create --name $(PROJECT_NAME)-pod \
+		-p 50051:50051 -p 8000:8000 -p 9090:9090 \
+		-p 6379:6379 -p 9000:9000 -p 9001:9001 \
+		-p 3000:3000 -p 9091:9091
+	@echo "$(YELLOW)Starting services in pod...$(NC)"
+	$(PODMAN_COMPOSE) -f podman-compose.yml up -d
+	@echo "$(GREEN)✓ Pod created and services started$(NC)"
+
+run-dev: check-podman ## Start services in development mode
+	$(PODMAN_COMPOSE) -f podman-compose.yml -f podman-compose.dev.yml up
+
+stop: check-podman ## Stop all services
+	$(PODMAN_COMPOSE) -f podman-compose.yml down
+	@echo "$(GREEN)✓ Services stopped$(NC)"
+
+stop-pod: check-podman ## Stop and remove pod
+	$(PODMAN) pod stop $(PROJECT_NAME)-pod 2>/dev/null || true
+	$(PODMAN) pod rm $(PROJECT_NAME)-pod 2>/dev/null || true
+	@echo "$(GREEN)✓ Pod stopped and removed$(NC)"
+
+clean: stop ## Clean up containers, volumes, and generated files
+	$(PODMAN_COMPOSE) -f podman-compose.yml down -v
+	$(PODMAN) system prune -f
+	rm -rf src/generated/*.py
+	rm -rf __pycache__ src/__pycache__ src/**/__pycache__
+	rm -rf .pytest_cache .coverage htmlcov
+	rm -rf logs/*.log
+	@echo "$(GREEN)✓ Cleanup complete$(NC)"
+
+test: ## Run tests
+	pytest tests/ -v --cov=src --cov-report=html --cov-report=term
+	@echo "$(GREEN)✓ Tests completed$(NC)"
+
+test-unit: ## Run unit tests only
+	pytest tests/unit -v
+
+test-integration: ## Run integration tests
+	pytest tests/integration -v
+
+lint: ## Run linting checks
+	flake8 src/ tests/ --max-line-length=100 --ignore=E203,W503
+	mypy src/ --ignore-missing-imports
+	@echo "$(GREEN)✓ Linting complete$(NC)"
+
+format: ## Format code with black
+	black src/ tests/ --line-length=100
+	@echo "$(GREEN)✓ Code formatted$(NC)"
+
+benchmark: ## Run performance benchmarks
+	$(PYTHON) benchmarks/run_benchmarks.py
+	@echo "$(GREEN)✓ Benchmarks complete$(NC)"
+
+logs: check-podman ## Show logs from all services
+	$(PODMAN_COMPOSE) -f podman-compose.yml logs -f
+
+logs-grpc: check-podman ## Show gRPC server logs
+	$(PODMAN_COMPOSE) -f podman-compose.yml logs -f grpc-server
+
+logs-workers: check-podman ## Show worker logs
+	$(PODMAN_COMPOSE) -f podman-compose.yml logs -f stt-worker ocr-worker
+
+monitor: ## Open monitoring dashboards
+	@echo "$(YELLOW)Opening monitoring dashboards...$(NC)"
+	@echo "Grafana: http://localhost:3000 (admin/admin)"
+	@echo "Prometheus: http://localhost:9091"
+
+download-models: ## Download ML models
+	$(PYTHON) scripts/download_models.py
+	@echo "$(GREEN)✓ Models downloaded$(NC)"
+
+scale-stt: check-podman ## Scale STT workers (usage: make scale-stt N=4)
+	$(PODMAN_COMPOSE) -f podman-compose.yml up -d --scale stt-worker=$(N)
+	@echo "$(GREEN)✓ Scaled STT workers to $(N)$(NC)"
+
+scale-ocr: check-podman ## Scale OCR workers (usage: make scale-ocr N=4)
+	$(PODMAN_COMPOSE) -f podman-compose.yml up -d --scale ocr-worker=$(N)
+	@echo "$(GREEN)✓ Scaled OCR workers to $(N)$(NC)"
+
+health: check-podman ## Check service health
+	@echo "$(YELLOW)Checking service health...$(NC)"
+	@curl -s http://localhost:8000/health | jq . || echo "API not responding"
+	@$(PODMAN) exec streamprocess-redis redis-cli ping 2>/dev/null && echo "$(GREEN)✓ Redis is healthy$(NC)" || echo "$(RED)✗ Redis is not responding$(NC)"
+	@echo ""
+	@echo "$(BLUE)Container status:$(NC)"
+	@$(PODMAN) ps --format "table {{.Names}}\t{{.Status}}\t{{.State}}"
+
+security-scan: check-podman ## Scan images for vulnerabilities
+	@echo "$(YELLOW)Scanning container images for vulnerabilities...$(NC)"
+	@for image in $$($(PODMAN) images --format "{{.Repository}}:{{.Tag}}" | grep $(PROJECT_NAME)); do \
+		echo "$(BLUE)Scanning $$image...$(NC)"; \
+		$(PODMAN) image scan $$image 2>/dev/null || echo "Install podman-scanner for vulnerability scanning"; \
+	done
+
+generate-kube: check-podman ## Generate Kubernetes YAML from Podman
+	@echo "$(YELLOW)Generating Kubernetes manifests...$(NC)"
+	$(PODMAN) generate kube $(PROJECT_NAME)-pod > k8s/generated-from-podman.yaml
+	@echo "$(GREEN)✓ Kubernetes manifest generated at k8s/generated-from-podman.yaml$(NC)"
+
+export-images: check-podman ## Export container images as OCI archives
+	@echo "$(YELLOW)Exporting container images...$(NC)"
+	@mkdir -p exports
+	@for image in $$($(PODMAN) images --format "{{.Repository}}:{{.Tag}}" | grep $(PROJECT_NAME)); do \
+		name=$$(echo $$image | sed 's/[:/]/-/g'); \
+		echo "Exporting $$image to exports/$$name.tar"; \
+		$(PODMAN) save -o exports/$$name.tar $$image; \
+	done
+	@echo "$(GREEN)✓ Images exported to exports/$(NC)"
+
+import-images: check-podman ## Import container images from OCI archives
+	@echo "$(YELLOW)Importing container images...$(NC)"
+	@for file in exports/*.tar; do \
+		echo "Importing $$file"; \
+		$(PODMAN) load -i $$file; \
+	done
+	@echo "$(GREEN)✓ Images imported$(NC)"
+
+rootless-info: check-podman ## Show rootless Podman information
+	@echo "$(BLUE)Rootless Podman Configuration:$(NC)"
+	@echo "User: $$(whoami)"
+	@echo "UID: $$(id -u)"
+	@echo "Rootless: $$($(PODMAN) info --format '{{.Host.Security.Rootless}}')"
+	@echo "Storage Driver: $$($(PODMAN) info --format '{{.Store.GraphDriverName}}')"
+	@echo "Storage Root: $$($(PODMAN) info --format '{{.Store.GraphRoot}}')"
+	@echo "Run Root: $$($(PODMAN) info --format '{{.Store.RunRoot}}')"
+	@echo ""
+	@echo "$(YELLOW)User Namespaces:$(NC)"
+	@cat /proc/self/uid_map 2>/dev/null || echo "Unable to read uid_map"
+	@echo ""
+	@echo "$(YELLOW)Cgroup Version:$(NC)"
+	@$(PODMAN) info --format '{{.Host.CgroupsVersion}}'
+
+init: install proto download-models ## Initialize project (install deps, compile protos, download models)
+	@echo "$(GREEN)✓ Project initialized successfully!$(NC)"
+	@echo "$(BLUE)Next step: Run 'make build' to build container images$(NC)"
+
+dev: dev-install proto ## Setup development environment
+	@echo "$(GREEN)✓ Development environment ready!$(NC)"
+
+.DEFAULT_GOAL := help
