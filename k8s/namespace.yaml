@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: streamprocess
+  labels:
+    name: streamprocess
+    app.kubernetes.io/name: streamprocess
+    app.kubernetes.io/version: "1.0.0"

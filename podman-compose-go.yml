@@ -1,0 +1,307 @@
+version: '3.8'
+
+# Podman-compose configuration for StreamProcess with Go services
+# High-performance setup with Go workers and gRPC server
+
+services:
+  redis:
+    image: docker.io/redis:7-alpine
+    container_name: streamprocess-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data:Z
+    command: redis-server --appendonly yes --maxmemory 4gb --maxmemory-policy allkeys-lru
+    networks:
+      - streamprocess-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    userns_mode: keep-id
+    security_opt:
+      - label=disable
+
+  minio:
+    image: docker.io/minio/minio:latest
+    container_name: streamprocess-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data:Z
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    networks:
+      - streamprocess-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    userns_mode: keep-id
+
+  # Python API service for ML processing
+  python-api:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: rest-api
+    container_name: streamprocess-python-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - streamprocess-network
+    volumes:
+      - ./models:/app/models:Z,ro
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+
+  # Go gRPC streaming server
+  grpc-server:
+    build:
+      context: .
+      dockerfile: Containerfile.go
+      target: grpc-server
+    container_name: streamprocess-grpc-go
+    ports:
+      - "50051:50051"  # gRPC
+      - "8080:8080"    # HTTP Gateway
+      - "9092:9092"    # Metrics
+    environment:
+      - GRPC_GRPC_PORT=50051
+      - GRPC_HTTP_PORT=8080
+      - GRPC_METRICS_PORT=9092
+      - GRPC_REDIS_ADDR=redis:6379
+      - GRPC_LOG_LEVEL=info
+    depends_on:
+      - redis
+      - python-api
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  # Go STT Workers (high-performance)
+  stt-worker-go:
+    build:
+      context: .
+      dockerfile: Containerfile.go
+      target: stt-worker
+    environment:
+      - STT_REDIS_ADDR=redis:6379
+      - STT_PYTHON_API_URL=http://python-api:8000
+      - STT_CONSUMER_GROUP=stt_workers_go
+      - STT_CONSUMER_NAME=stt_worker_go_${HOSTNAME:-1}
+      - STT_METRICS_PORT=9090
+      - STT_LOG_LEVEL=info
+    depends_on:
+      - redis
+      - python-api
+    networks:
+      - streamprocess-network
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+
+  # Go OCR Workers (high-performance)
+  ocr-worker-go:
+    build:
+      context: .
+      dockerfile: Containerfile.go
+      target: ocr-worker
+    environment:
+      - OCR_REDIS_ADDR=redis:6379
+      - OCR_PYTHON_API_URL=http://python-api:8000
+      - OCR_CONSUMER_GROUP=ocr_workers_go
+      - OCR_CONSUMER_NAME=ocr_worker_go_${HOSTNAME:-1}
+      - OCR_METRICS_PORT=9091
+      - OCR_LOG_LEVEL=info
+      - OCR_TESSERACT_PATH=/usr/bin/tesseract
+    depends_on:
+      - redis
+      - python-api
+    networks:
+      - streamprocess-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=200m
+
+  # Go Autoscaler Controller
+  autoscaler:
+    build:
+      context: .
+      dockerfile: Containerfile.go
+      target: autoscaler
+    container_name: streamprocess-autoscaler
+    environment:
+      - AUTOSCALER_NAMESPACE=streamprocess
+      - AUTOSCALER_REDIS_ADDR=redis:6379
+      - AUTOSCALER_CHECK_INTERVAL=30s
+      - AUTOSCALER_METRICS_PORT=9093
+      - AUTOSCALER_LOG_LEVEL=info
+      # STT worker config
+      - AUTOSCALER_STT_WORKERS_DEPLOYMENT_NAME=stt-worker-go
+      - AUTOSCALER_STT_WORKERS_MIN_REPLICAS=1
+      - AUTOSCALER_STT_WORKERS_MAX_REPLICAS=10
+      - AUTOSCALER_STT_WORKERS_TARGET_QUEUE_DEPTH=10
+      - AUTOSCALER_STT_WORKERS_KP=0.5
+      - AUTOSCALER_STT_WORKERS_KI=0.1
+      - AUTOSCALER_STT_WORKERS_KD=0.05
+      # OCR worker config
+      - AUTOSCALER_OCR_WORKERS_DEPLOYMENT_NAME=ocr-worker-go
+      - AUTOSCALER_OCR_WORKERS_MIN_REPLICAS=1
+      - AUTOSCALER_OCR_WORKERS_MAX_REPLICAS=8
+      - AUTOSCALER_OCR_WORKERS_TARGET_QUEUE_DEPTH=5
+      - AUTOSCALER_OCR_WORKERS_KP=0.6
+      - AUTOSCALER_OCR_WORKERS_KI=0.15
+      - AUTOSCALER_OCR_WORKERS_KD=0.1
+    depends_on:
+      - redis
+    networks:
+      - streamprocess-network
+    volumes:
+      - ${HOME}/.kube/config:/etc/kubeconfig:Z,ro  # For local k8s access
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+
+  # Triton Inference Server
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: streamprocess-triton
+    ports:
+      - "8001:8001"  # HTTP
+      - "8002:8002"  # gRPC
+      - "8003:8003"  # Metrics
+    volumes:
+      - ./triton/models:/models:Z,ro
+    command: tritonserver --model-repository=/models --strict-model-config=false
+    networks:
+      - streamprocess-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    userns_mode: keep-id
+
+  # SQS Queue (LocalStack for development)
+  localstack:
+    image: docker.io/localstack/localstack:latest
+    container_name: streamprocess-sqs
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - DATA_DIR=/tmp/localstack/data
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - localstack-data:/tmp/localstack:Z
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+    userns_mode: keep-id
+
+  # Monitoring
+  prometheus:
+    image: docker.io/prom/prometheus:latest
+    container_name: streamprocess-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus-go.yml:/etc/prometheus/prometheus.yml:Z,ro
+      - prometheus-data:/prometheus:Z
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+
+  grafana:
+    image: docker.io/grafana/grafana:latest
+    container_name: streamprocess-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana:Z
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:Z,ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:Z,ro
+    depends_on:
+      - prometheus
+    networks:
+      - streamprocess-network
+    restart: unless-stopped
+    userns_mode: keep-id
+    cap_drop:
+      - ALL
+
+networks:
+  streamprocess-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis-data:
+    driver: local
+  minio-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  localstack-data:
+    driver: local

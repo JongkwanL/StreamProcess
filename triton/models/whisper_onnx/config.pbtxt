@@ -1,0 +1,34 @@
+name: "whisper_onnx"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
+
+input [
+  {
+    name: "mel"
+    data_type: TYPE_FP32
+    dims: [ 80, 3000 ]
+  }
+]
+
+output [
+  {
+    name: "output_ids"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+  }
+]
+
+version_policy: { all { }}
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 4, 8 ]
+  max_queue_delay_microseconds: 100000
+}

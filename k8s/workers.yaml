@@ -1,0 +1,206 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models-pvc
+  namespace: streamprocess
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+
+---
+# STT Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stt-worker
+  namespace: streamprocess
+  labels:
+    app: stt-worker
+    worker-type: stt
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stt-worker
+  template:
+    metadata:
+      labels:
+        app: stt-worker
+        worker-type: stt
+    spec:
+      containers:
+      - name: stt-worker
+        image: streamprocess:stt-worker
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WORKER_TYPE
+          value: "stt"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: MINIO_ENDPOINT
+          value: "minio-service:9000"
+        - name: WHISPER_MODEL_SIZE
+          value: "base"
+        - name: WHISPER_DEVICE
+          value: "cpu"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        volumeMounts:
+        - name: models
+          mountPath: /app/models
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: models-pvc
+      - name: tmp
+        emptyDir: {}
+
+---
+# OCR Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  namespace: streamprocess
+  labels:
+    app: ocr-worker
+    worker-type: ocr
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ocr-worker
+  template:
+    metadata:
+      labels:
+        app: ocr-worker
+        worker-type: ocr
+    spec:
+      containers:
+      - name: ocr-worker
+        image: streamprocess:ocr-worker
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WORKER_TYPE
+          value: "ocr"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: MINIO_ENDPOINT
+          value: "minio-service:9000"
+        - name: OCR_USE_GPU
+          value: "false"
+        - name: OCR_LANG
+          value: "en,ch_sim"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        volumeMounts:
+        - name: models
+          mountPath: /app/models
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: models-pvc
+      - name: tmp
+        emptyDir: {}
+
+---
+# Horizontal Pod Autoscaler for STT Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: stt-worker-hpa
+  namespace: streamprocess
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: stt-worker
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+
+---
+# Horizontal Pod Autoscaler for OCR Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ocr-worker-hpa
+  namespace: streamprocess
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ocr-worker
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
