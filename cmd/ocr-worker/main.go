@@ -16,7 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/streamprocess/streamprocess/pkg/queue"
+	"streamprocess/pkg/queue"
 )
 
 // OCRWorker handles Optical Character Recognition jobs

@@ -15,7 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/streamprocess/streamprocess/pkg/queue"
+	"streamprocess/pkg/queue"
 )
 
 // STTWorker handles Speech-to-Text processing jobs

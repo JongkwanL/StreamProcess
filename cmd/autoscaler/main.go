@@ -20,16 +20,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	metricsv1beta1 "k8s.io/metrics/clientset/versioned"
+	// metricsv1beta1 "k8s.io/metrics/clientset/versioned" // Removed for compatibility
 	
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"net/http"
 )
 
 // AutoscalerController handles intelligent autoscaling for StreamProcess workers
 type AutoscalerController struct {
 	k8sClient     kubernetes.Interface
-	metricsClient metricsv1beta1.Interface
+	// metricsClient metricsv1beta1.Interface // Removed for compatibility
 	redisClient   *redis.Client
 	logger        *logrus.Logger
 	metrics       *ControllerMetrics

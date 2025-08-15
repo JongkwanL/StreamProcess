@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package streamprocess;
 
+option go_package = "streamprocess/pkg/protos";
+
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
 

@@ -22,8 +22,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
-	pb "github.com/streamprocess/streamprocess/protos"
-	"github.com/streamprocess/streamprocess/pkg/queue"
+	pb "streamprocess/pkg/protos"
+	"streamprocess/pkg/queue"
 )
 
 // StreamProcessServer implements the gRPC streaming services
